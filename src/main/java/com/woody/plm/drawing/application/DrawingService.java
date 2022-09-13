@@ -3,7 +3,9 @@ package com.woody.plm.drawing.application;
 import com.woody.plm.drawing.domain.Drawing;
 import com.woody.plm.drawing.domain.DrawingRepository;
 import com.woody.plm.drawing.dto.DrawingDto;
+import com.woody.plm.drawing.dto.DrawingRevisionResponseDto;
 import com.woody.plm.drawing.dto.DrawingSearchRequestDto;
+import com.woody.plm.drawing.dto.DrawingUploadRequestDto;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.MalformedURLException;
@@ -12,13 +14,15 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Date;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import javax.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
+import org.springframework.data.history.Revisions;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -43,7 +47,7 @@ public class DrawingService {
     }
   }
 
-  public List<DrawingDto> findAllByQuery(DrawingSearchRequestDto query){
+  public List<DrawingDto> findAllByQuery(DrawingSearchRequestDto query) {
     return drawingRepository.findAllByObject(query);
   }
 
@@ -51,62 +55,96 @@ public class DrawingService {
   public List<Drawing> uploadFiles(MultipartFile[] files) {
     List<Drawing> result = new ArrayList<>();
 
-    for(var file : files){
-      result.add(uploadFile(file));
+    for (var file : files) {
+      result.add(uploadFile(file, null));
     }
 
     return result;
   }
 
-  @Transactional
-  public Drawing uploadFile(MultipartFile file) {
+  //  @Transactional
+  public Drawing uploadFile(MultipartFile file, DrawingUploadRequestDto data) {
+
     String originalFileName = StringUtils.cleanPath(file.getOriginalFilename());
 
-    String fileName;
+    String physicalFileName;
 
     try {
       if (originalFileName.contains("..")) {
-        throw new Exception("파일명에 부적합 문자가 포함되어 있습니다.");
+        throw new FileUploadFailedException("파일명에 부적합 문자가 포함되어 있습니다.");
       }
 
+      String fileNameWithoutExtension;
       String fileExtension;
 
       try {
+        fileNameWithoutExtension = originalFileName.substring(0, originalFileName.lastIndexOf("."));
         fileExtension = originalFileName.substring(originalFileName.lastIndexOf("."));
       } catch (Exception e) {
+        fileNameWithoutExtension = originalFileName;
         fileExtension = "";
       }
 
-      ;
+      { // if data is null
+        if (data == null) {
+          data = new DrawingUploadRequestDto();
+          data.setDrawingNo("" + System.currentTimeMillis() % 100000);
+          data.setDrawingName(fileNameWithoutExtension);
+          data.setDrafter("woody");
+        }
+      }
 
-      // string base64 encode
-      fileName = java.util.Base64.getEncoder().encodeToString(String.format("%s%s", originalFileName, (new Date()).toString()).getBytes()) + fileExtension;
+      Drawing byDrawingNo = drawingRepository.findByDrawingNo(data.getDrawingNo());
+      Drawing saveDrawing;
 
-      Drawing drawing = Drawing.builder()
-          .drawingName(originalFileName)
-          .fileName(fileName)
-          .drafter("woody")
-          .drawingNo(String.valueOf(System.currentTimeMillis() % 100000))
-          .build();
+      if (byDrawingNo == null) {
+        saveDrawing = Drawing.builder()
+            .drawingNo((data != null) ? data.getDrawingNo()
+                : String.valueOf(System.currentTimeMillis() % 10000000))
+            .drawingName((data != null) ? data.getDrawingName() : fileNameWithoutExtension)
+            .fileName(originalFileName)
+            .drafter((data != null) ? data.getDrafter() : "tester")
+            .version(0L)
+            .comment(data.getComment())
+            .build();
 
-      drawingRepository.save(drawing);
+      } else {
 
-      Path targetLocation = this.fileStorageLocation.resolve(fileName);
+        Drawing lastEntity = drawingRepository.findLastChangeRevision(byDrawingNo.getId()).get()
+            .getEntity();
+
+        saveDrawing = Drawing.builder()
+            .id(byDrawingNo.getId())
+            .drawingNo(byDrawingNo.getDrawingNo())
+            .drawingName(data.getDrawingName())
+            .fileName(originalFileName)
+            .drafter(data.getDrafter())
+            .version(lastEntity.getVersion() + 1)
+            .comment(data.getComment())
+            .build();
+      }
+
+      Drawing save = drawingRepository.save(saveDrawing);
+
+      physicalFileName = save.getId().toString()+"_"+save.getVersion();
+
+      Path targetLocation = this.fileStorageLocation.resolve(physicalFileName);
 
       Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
-      return drawing;
+      return save;
     } catch (Exception e) {
-      throw new FileUploadFiledException("upload failed", e);
+      throw new FileUploadFailedException("upload failed", e);
     }
   }
 
-  public Resource loadFileAsResource(Long no) throws Exception {
+  public Resource loadFile(Long no, boolean checkout) throws Exception {
 
     Optional<Drawing> byId = drawingRepository.findById(no);
     Drawing drawing = byId.get();
 
     String fileName = drawing.getFileName();
-    Path filePath = this.fileStorageLocation.resolve(fileName).normalize();
+    String physicalFileName = drawing.getId().toString() + "_" + drawing.getVersion();
+    Path filePath = this.fileStorageLocation.resolve(physicalFileName).normalize();
     Resource resource = null;
     try {
       resource = new UrlResource(filePath.toUri());
@@ -121,4 +159,20 @@ public class DrawingService {
   }
 
 
+  public List<DrawingRevisionResponseDto> listRevisions(Long drawingId) {
+    Revisions<Integer, Drawing> revisions = drawingRepository.findRevisions(drawingId);
+
+    List<DrawingRevisionResponseDto> collect = revisions.getContent().stream()
+        .map(r -> DrawingRevisionResponseDto.builder()
+            .id(r.getEntity().getId())
+            .drawingNo(r.getEntity().getDrawingNo())
+            .drawingName(r.getEntity().getDrawingName())
+            .drafter(r.getEntity().getDrafter())
+            .version(r.getEntity().getVersion())
+            .comment(r.getEntity().getComment())
+            .modifiedDate(r.getEntity().getModifiedDate())
+            .build()).sorted(Comparator.comparing(DrawingRevisionResponseDto::getVersion).reversed()).collect(Collectors.toList());
+
+    return collect;
+  }
 }

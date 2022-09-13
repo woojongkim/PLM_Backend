@@ -29,8 +29,8 @@ public class DrawingCustomRepositoryImpl extends QuerydslRepositorySupport imple
   @Override
   public List<DrawingDto> findAllByObject(DrawingSearchRequestDto query) {
     List<DrawingDto> fetch = jpaQueryFactory.select(
-            new QDrawingDto(drawing.id, drawing.drawingNo, drawing.drawingName, drawing.drafter,
-                drawing.createdDate))
+            new QDrawingDto(drawing.id, drawing.drawingNo, drawing.drawingName, drawing.drafter, drawing.version,
+                drawing.modifiedDate))
         .from(drawing)
         .where(
             StringUtils.hasText(query.getDrawingNo()) ? drawing.drawingNo.contains(
@@ -39,9 +39,9 @@ public class DrawingCustomRepositoryImpl extends QuerydslRepositorySupport imple
                 query.getDrawingName()) : null,
             StringUtils.hasText(query.getDrafter()) ? drawing.drafter.contains(query.getDrafter())
                 : null,
-            query.getStartDate() != null ? drawing.createdDate.after(query.getStartDate().toInstant().atZone(
+            query.getStartDate() != null ? drawing.modifiedDate.after(query.getStartDate().toInstant().atZone(
                 ZoneId.systemDefault()).toLocalDateTime()) : null,
-            query.getEndDate() != null ? drawing.createdDate.before(query.getEndDate().toInstant().atZone(
+            query.getEndDate() != null ? drawing.modifiedDate.before(query.getEndDate().toInstant().atZone(
                 ZoneId.systemDefault()).toLocalDateTime()) : null
         ).fetch();
     return fetch;
